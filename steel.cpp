@@ -3,24 +3,17 @@
 #include <string>
 #include <cmath>
 #include <iomanip>
-#include <algorithm>
-
-struct Element
-{
-    std::string name;
-    double currentPercentage;
-    double targetPercentage;
-    double currentWeight;
-};
+#include "include/csv_utils.hpp"
 
 class SteelGradeCalculator
 {
 private:
     double totalWeight;
     std::vector<Element> elements;
-    // 0.1% tolerance (in the real world, some elements in the initial composition may not be wanted in the final spec)
-    // As long as the difference is within this tolerance, we consider the composition to be acceptable.
-    const double TOLERANCE = 0.001;
+    std::vector<IterationData> iterationsData;
+    // 1% tolerance (in the real world, some elements in the initial composition may not be wanted in the final spec)
+    // As long as the difference is within this tolerance, I consider the composition to be acceptable.
+    const double TOLERANCE = 0.01;
 
     void updatePercentages()
     {
@@ -30,18 +23,81 @@ private:
         }
     }
 
+    double parsePercentage(const std::string &str)
+    {
+        std::string cleaned = str;
+        cleaned.erase(std::remove(cleaned.begin(), cleaned.end(), '%'), cleaned.end());
+        return std::stod(cleaned);
+    }
+
 public:
     SteelGradeCalculator(double weight) : totalWeight(weight) {}
 
-    void addElement(const std::string &name, double current, double target)
+    // load steel composition data from a CSV file
+    void loadFromCSV(const std::string &filename)
     {
-        double currentWeight = (current / 100.0) * totalWeight;
-        elements.push_back({name, current, target, currentWeight});
+        try
+        {
+            auto data = ExcelCSVReader::readCSV(filename);
+
+            if (data.size() < 2)
+            {
+                throw std::runtime_error("CSV file must contain at least a header row and one data row");
+            }
+
+            elements.clear();
+            iterationsData.clear();
+
+            int nameCol = -1, currentCol = -1, targetCol = -1;
+            for (size_t i = 0; i < data[0].size(); i++)
+            {
+                std::string header = data[0][i];
+                std::transform(header.begin(), header.end(), header.begin(), ::tolower);
+
+                if (header.find("element") != std::string::npos)
+                    nameCol = i;
+                else if (header.find("initial") != std::string::npos)
+                    currentCol = i;
+                else if (header.find("final") != std::string::npos)
+                    targetCol = i;
+            }
+
+            if (nameCol == -1 || currentCol == -1 || targetCol == -1)
+            {
+                throw std::runtime_error("Required columns not found in CSV");
+            }
+
+            for (size_t i = 1; i < data.size(); i++)
+            {
+                try
+                {
+                    std::string name = data[i][nameCol];
+                    double current = parsePercentage(data[i][currentCol]);
+                    double target = parsePercentage(data[i][targetCol]);
+                    double currentWeight = (current / 100.0) * totalWeight;
+
+                    elements.push_back({name, current, target, currentWeight});
+                }
+                catch (const std::exception &e)
+                {
+                    std::cerr << "Warning: Skipping invalid row " << i << ": " << e.what() << std::endl;
+                }
+            }
+
+            // Store initial state
+            iterationsData.push_back({0, elements, {}, totalWeight});
+
+            std::cout << "Successfully loaded " << elements.size() << " elements from " << filename << std::endl;
+        }
+        catch (const std::exception &e)
+        {
+            throw std::runtime_error("Error loading CSV file: " + std::string(e.what()));
+        }
     }
 
+    // main algorithm to calculate additions
     void calculateAdditions()
     {
-        // Print initial composition
         std::cout << "\nInitial composition before additions:\n";
         for (const auto &element : elements)
         {
@@ -63,40 +119,45 @@ public:
             changesNeeded = false;
             iterations++;
 
+            std::vector<std::pair<std::string, double>> currentIterationAdditions;
+
             for (auto &element : elements)
             {
                 if (element.name == "Iron")
-                    continue; // Skip iron as it's the balance
+                    continue;
 
                 double targetWeight = (element.targetPercentage / 100.0) * totalWeight;
                 if (element.currentWeight < targetWeight)
                 {
                     double addition = targetWeight - element.currentWeight;
-
-                    // Add a small buffer to account for future dilution
                     addition *= 1.05;
 
-                    if (addition > 0.01)
-                    { // Only add if the addition is significant
+                    if (addition > TOLERANCE)
+                    {
                         std::cout << "Add " << addition << " kg of " << element.name << "\n";
                         element.currentWeight += addition;
                         totalWeight += addition;
                         changesNeeded = true;
+                        currentIterationAdditions.push_back({element.name, addition});
                     }
+                }
+                else if (std::abs(element.currentPercentage - element.targetPercentage) > TOLERANCE)
+                {
+                    changesNeeded = true;
                 }
             }
 
-            // Update iron weight to maintain mass balance
             auto &iron = *std::find_if(elements.begin(), elements.end(),
                                        [](const Element &e)
                                        { return e.name == "Iron"; });
-            iron.currentWeight = iron.currentWeight; // Iron weight stays the same
+            iron.currentWeight = iron.currentWeight;
 
-            // Recalculate all percentages
             updatePercentages();
+
+            // Store iteration data
+            iterationsData.push_back({iterations, elements, currentIterationAdditions, totalWeight});
         }
 
-        // Print final composition
         std::cout << "\nFinal composition after additions:\n";
         for (const auto &element : elements)
         {
@@ -107,8 +168,13 @@ public:
 
         std::cout << "\nTotal weight added: " << (totalWeight - originalWeight) << " kg\n";
         std::cout << "Final batch weight: " << totalWeight << " kg\n";
+
+        // Write all iteration data to CSV files
+        CSVWriter::writeIterationData("steel_additions", iterationsData);
+        std::cout << "\nDetailed results have been written to the 'output' directory.\n";
     }
 
+    // verify that the final composition matches the target composition
     bool verifyComposition()
     {
         for (const auto &element : elements)
@@ -124,23 +190,17 @@ public:
 
 int main()
 {
-    // Initialize calculator with initial batch weight (whatever the weight of the ladle is)
-    SteelGradeCalculator calculator(1000);
-
-    // Add elements with initial and target percentages for 316 SS
-    calculator.addElement("Chromium", 14.79, 17.00);
-    calculator.addElement("Nickel", 2.00, 12.00);
-    calculator.addElement("Molybdenum", 0.50, 2.50);
-    calculator.addElement("Carbon", 0.01, 0.08);
-    calculator.addElement("Manganese", 1.00, 2.00);
-    calculator.addElement("Phosphorus", 0.03, 0.05);
-    calculator.addElement("Sulfur", 0.02, 0.03);
-    calculator.addElement("Silicon", 0.60, 0.75);
-    calculator.addElement("Nitrogen", 0.05, 0.10);
-    calculator.addElement("Iron", 81.00, 65.49);
-
-    // Calculate required additions
-    calculator.calculateAdditions();
+    try
+    {
+        SteelGradeCalculator calculator(1000);
+        calculator.loadFromCSV("steel_composition.csv");
+        calculator.calculateAdditions();
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
+    }
 
     return 0;
 }
