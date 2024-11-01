@@ -121,6 +121,39 @@ public:
 
             std::vector<std::pair<std::string, double>> currentIterationAdditions;
 
+            // First, check if any elements are above target and calculate required dilution
+            double maxDilutionNeeded = 0.0;
+            for (const auto &element : elements)
+            {
+                if (element.name == "Iron")
+                    continue;
+
+                if (element.currentPercentage > element.targetPercentage)
+                {
+                    // Calculate how much the total mass needs to increase to dilute this element
+                    double currentMass = element.currentWeight;
+                    double desiredPercentage = element.targetPercentage / 100.0;
+                    double requiredTotalMass = currentMass / desiredPercentage;
+                    double dilutionNeeded = requiredTotalMass - totalWeight;
+                    maxDilutionNeeded = std::max(maxDilutionNeeded, dilutionNeeded);
+                }
+            }
+
+            // If dilution is needed, add iron first
+            if (maxDilutionNeeded > TOLERANCE)
+            {
+                std::cout << "Add " << maxDilutionNeeded << " kg of Iron for dilution\n";
+                auto &iron = *std::find_if(elements.begin(), elements.end(),
+                                           [](const Element &e)
+                                           { return e.name == "Iron"; });
+                iron.currentWeight += maxDilutionNeeded;
+                totalWeight += maxDilutionNeeded;
+                currentIterationAdditions.push_back({"Iron", maxDilutionNeeded});
+                changesNeeded = true;
+                updatePercentages();
+            }
+
+            // Then handle elements below target
             for (auto &element : elements)
             {
                 if (element.name == "Iron")
@@ -130,7 +163,7 @@ public:
                 if (element.currentWeight < targetWeight)
                 {
                     double addition = targetWeight - element.currentWeight;
-                    addition *= 1.05;
+                    addition *= 1.05; // Add 5% extra to account for future dilution
 
                     if (addition > TOLERANCE)
                     {
@@ -141,18 +174,21 @@ public:
                         currentIterationAdditions.push_back({element.name, addition});
                     }
                 }
-                else if (std::abs(element.currentPercentage - element.targetPercentage) > TOLERANCE)
+            }
+
+            updatePercentages();
+
+            // Check if any element is still outside tolerance
+            for (const auto &element : elements)
+            {
+                if (element.name == "Iron")
+                    continue;
+
+                if (std::abs(element.currentPercentage - element.targetPercentage) > TOLERANCE)
                 {
                     changesNeeded = true;
                 }
             }
-
-            auto &iron = *std::find_if(elements.begin(), elements.end(),
-                                       [](const Element &e)
-                                       { return e.name == "Iron"; });
-            iron.currentWeight = iron.currentWeight;
-
-            updatePercentages();
 
             // Store iteration data
             iterationsData.push_back({iterations, elements, currentIterationAdditions, totalWeight});
